@@ -3,70 +3,75 @@ const { PythonShell } = require('python-shell');
 const cors = require('cors');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
+const { exec } = require('child_process'); // Needed for Java
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 
-// --- 1. SAFETY: RATE LIMITING ---
-// This prevents one user from spamming your 0.1 CPU. 
-// Limits each IP to 12 requests per minute.
-
 const limiter = rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minute
+    windowMs: 1 * 60 * 1000, 
     max: 20, 
     message: { success: false, error: "Too many requests. Please wait a minute." }
 });
 
 app.use(cors());
 app.use(express.json());
-app.use('/execute', limiter);
 
-// --- 2. THE EXECUTION ENDPOINT ---
-app.post('/execute', (appReq, appRes) => {
-    const code = appReq.body.code;
+// --- THE EXECUTION ENDPOINT ---
+app.post('/execute', limiter, (appReq, appRes) => {
+    const { code, language } = appReq.body; // Added language parameter
 
     if (!code) {
         return appRes.status(400).json({ success: false, error: "No code provided" });
     }
 
-    let options = {
-        mode: 'text',
-        pythonOptions: ['-u'], 
-    };
+    // --- LOGIC FOR PYTHON ---
+    if (language === 'python') {
+        let options = { mode: 'text', pythonOptions: ['-u'] };
+        
+        PythonShell.runString(code, options)
+            .then(messages => {
+                appRes.json({ success: true, output: messages.join('\n') || ">>> Execution finished" });
+            })
+            .catch(err => appRes.status(400).json({ success: false, error: err.message }));
+    } 
 
-    // SAFETY: Kill the script if it takes longer than 5 seconds
-    const timeout = setTimeout(() => {
-        return appRes.status(408).json({ 
-            success: false, 
-            error: "Execution Timeout: Your code took longer than 5 seconds to run." 
-        });
-    }, 5000);
+    // --- LOGIC FOR JAVA ---
+    else if (language === 'java') {
+        const fileName = "Main.java";
+        const className = "Main";
 
-    PythonShell.runString(code, options).then(messages => {
-        clearTimeout(timeout); // Cancel timeout if code finishes fast
-        appRes.json({ 
-            success: true, 
-            output: messages.join('\n') || ">>> Execution finished (no output)" 
+        // 1. Save code to a file
+        fs.writeFileSync(fileName, code);
+
+        // 2. Compile and Run
+        // We use a 5-second limit to prevent infinite loops
+        exec(`javac ${fileName} && java ${className}`, { timeout: 5000 }, (error, stdout, stderr) => {
+            // Cleanup files after running
+            if (fs.existsSync(fileName)) fs.unlinkSync(fileName);
+            if (fs.existsSync(`${className}.class`)) fs.unlinkSync(`${className}.class`);
+
+            if (error) {
+                const errMsg = stderr || error.message;
+                return appRes.status(400).json({ success: false, error: errMsg });
+            }
+            appRes.json({ success: true, output: stdout || ">>> Execution finished" });
         });
-    }).catch(err => {
-        clearTimeout(timeout);
-        appRes.status(400).json({ success: false, error: err.message });
-    });
+    } 
+    
+    else {
+        appRes.status(400).json({ success: false, error: "Unsupported language" });
+    }
 });
-
-// --- 3. THE 8-MINUTE NUDGE (Stay Awake) ---
-// Replace with your actual Render URL once deployed
-const RENDER_URL = 'https://your-service-name.onrender.com/health';
 
 app.get('/health', (req, res) => res.send('System Online 🟢'));
 
+// KEEP ALIVE LOGIC
+const RENDER_URL = 'https://codino-kernel.onrender.com/health';
 setInterval(() => {
-    axios.get(RENDER_URL)
-        .then(() => console.log('Ping: Server staying awake...'))
-        .catch((err) => console.log('Ping failed (Server probably booting up)'));
-}, 480000); // 480,000ms = 8 minutes
-
+    axios.get(RENDER_URL).catch(() => console.log('Ping failed'));
+}, 480000); 
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Kernel secure and running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Kernel running on port ${PORT}`));
