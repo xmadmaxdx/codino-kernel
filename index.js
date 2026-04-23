@@ -1,5 +1,5 @@
 const express = require('express');
-const { PythonShell } = require('python-shell');
+const { PythonShell } = require('python-shell'); // Keep for structure
 const cors = require('cors');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
@@ -9,17 +9,15 @@ const path = require('path');
 
 const app = express();
 
-// --- 1. THE CRITICAL FIX FOR RENDER ---
-// This tells express-rate-limit to trust the Render proxy
-// and fixes the 'ERR_ERL_UNEXPECTED_X_FORWARDED_FOR' error.
+// --- 1. RENDER PROXY FIX ---
 app.set('trust proxy', 1); 
 
 app.use(cors());
 app.use(express.json());
 
-// --- 2. SAFETY: RATE LIMITING ---
+// --- 2. RATE LIMITING (Prevent Spam) ---
 const limiter = rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minute
+    windowMs: 1 * 60 * 1000, 
     max: 50, 
     message: { success: false, error: "Too many requests. Please wait a minute." }
 });
@@ -32,51 +30,47 @@ app.post('/execute', limiter, (req, res) => {
         return res.status(400).json({ success: false, error: "No code provided" });
     }
 
-    // Default to python if no language is specified for backward compatibility
-    const lang = language || 'python';
+    const lang = language || 'java'; // Default to Java if not specified
 
-    // --- PYTHON LOGIC ---
+    // --- PYTHON LOGIC (Kept as requested) ---
     if (lang === 'python') {
-        PythonShell.runString(code, { mode: 'text', pythonOptions: ['-u'] })
+        PythonShell.runString(code, { mode: 'text' })
             .then(messages => {
-                res.json({ 
-                    success: true, 
-                    output: messages.join('\n') || ">>> Execution finished (no output)" 
-                });
+                res.json({ success: true, output: messages.join('\n') });
             })
-            .catch(err => {
-                res.status(400).json({ success: false, error: err.message });
-            });
+            .catch(err => res.status(400).json({ success: false, error: err.message }));
     } 
 
-    // --- JAVA LOGIC ---
+    // --- JAVA LOGIC (Optimized & Accurate) ---
     else if (lang === 'java') {
-        // We use a unique ID or timestamp to prevent file collisions if 2 users run at once
-        const jobId = Date.now();
-        const fileName = `Main_${jobId}.java`;
-        const className = `Main_${jobId}`;
+        const fileName = "Main.java";
+        const className = "Main";
 
-        // Java is strict: we must replace "public class Main" with our temp class name
-        // so that the filename matches the class name perfectly.
-        const modifiedCode = code.replace(/public\s+class\s+Main/g, `public class ${className}`);
-        
-        fs.writeFileSync(fileName, modifiedCode);
+        // Step 1: Write the user's code to Main.java
+        fs.writeFileSync(fileName, code);
 
-        // Compile and Run
-        exec(`javac ${fileName} && java ${className}`, { timeout: 6000 }, (error, stdout, stderr) => {
-            // Cleanup: Remove .java and .class files immediately
+        // Step 2: Compile and Run
+        // We use a longer 7-second timeout for Java compilation
+        exec(`javac ${fileName} && java ${className}`, { timeout: 7000 }, (error, stdout, stderr) => {
+            
+            // Step 3: IMMEDIATE CLEANUP
+            // We must delete the files so the next request starts fresh
             if (fs.existsSync(fileName)) fs.unlinkSync(fileName);
             if (fs.existsSync(`${className}.class`)) fs.unlinkSync(`${className}.class`);
 
             if (error) {
-                // Return the specific Java compiler error (stderr) so the user can fix their code
-                const errorMessage = stderr || error.message;
+                // If javac fails, stderr contains the line number and error
+                // If the user used the wrong class name, this will tell them
+                const errorDetail = stderr || error.message;
                 return res.status(400).json({ 
                     success: false, 
-                    error: errorMessage 
+                    error: errorDetail.includes("should be declared in a file") 
+                           ? "Error: Your class name must be 'Main'." 
+                           : errorDetail
                 });
             }
             
+            // Step 4: Success!
             res.json({ 
                 success: true, 
                 output: stdout || ">>> Execution finished (no output)" 
@@ -89,16 +83,8 @@ app.post('/execute', limiter, (req, res) => {
     }
 });
 
-// --- 4. HEALTH & WAKE-UP ---
+// --- 4. HEALTH & MAINTENANCE ---
 app.get('/health', (req, res) => res.send('System Online 🟢'));
 
-// Keep-alive logic (Optional)
-const RENDER_URL = 'https://codino-kernel-2.onrender.com/health';
-setInterval(() => {
-    axios.get(RENDER_URL).catch(() => console.log('Waking up...'));
-}, 480000); // 8 minutes
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Kernel ready on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Java Kernel ready on port ${PORT}`));
